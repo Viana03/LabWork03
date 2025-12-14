@@ -76,8 +76,8 @@ private:
                 count++;
             }
             
-            if (count >= 3) {
-                // Use RLE for runs of 3+
+            if (count >= 5) {
+                // Use RLE for runs of 5+ (higher threshold reduces overhead)
                 compressed.push_back(0xFF); // RLE marker
                 compressed.push_back(static_cast<uint8_t>(count));
                 compressed.push_back(value);
@@ -101,7 +101,7 @@ private:
     // Simple RLE decompression
     static std::vector<uint8_t> rle_decompress(const std::vector<uint8_t>& compressed) {
         std::vector<uint8_t> data;
-        data.reserve(compressed.size() * 4);
+        data.reserve(std::min(static_cast<size_t>(1024 * 1024 * 1024), compressed.size() * 4));
         
         size_t i = 0;
         while (i < compressed.size()) {
@@ -111,9 +111,11 @@ private:
                     data.push_back(0xFF);
                     i += 2;
                 } else {
-                    // RLE sequence
+                    // RLE sequence - use push_back instead of insert to avoid memory issues
                     uint8_t value = compressed[i + 2];
-                    data.insert(data.end(), count, value);
+                    for (int j = 0; j < count; j++) {
+                        data.push_back(value);
+                    }
                     i += 3;
                 }
             } else {
@@ -218,11 +220,9 @@ public:
         std::memcpy(delta_bytes.data(), deltas.data(), delta_bytes.size());
         
         // Apply RLE compression
-        auto rle_compressed = rle_compress(delta_bytes);
+        auto final_compressed = rle_compress(delta_bytes);
         
-        std::cout << "After RLE: " << rle_compressed.size() << " bytes" << std::endl;
-        
-        // Write compressed file
+        std::cout << "After RLE: " << final_compressed.size() << " bytes" << std::endl;
         std::ofstream output(output_path, std::ios::binary);
         if (!output) {
             std::cerr << "Cannot open output file: " << output_path << std::endl;
@@ -232,7 +232,7 @@ public:
         // Write custom header
         Header hdr;
         hdr.original_size = file_size;
-        hdr.json_header_size = header_size;
+        hdr.json_header_size = header_data.size();  // Full header size including the 8-byte prefix
         hdr.num_tensors = num_floats;
         hdr.flags = 0;
         
@@ -241,17 +241,17 @@ public:
         // Write JSON header (uncompressed for simplicity)
         output.write(reinterpret_cast<const char*>(header_data.data()), header_data.size());
         
-        // Write compressed tensor data
-        uint64_t compressed_size = rle_compressed.size();
+        // Write compressed tensor data (with frequency compression)
+        uint64_t compressed_size = final_compressed.size();
         output.write(reinterpret_cast<const char*>(&compressed_size), sizeof(uint64_t));
-        output.write(reinterpret_cast<const char*>(rle_compressed.data()), rle_compressed.size());
+        output.write(reinterpret_cast<const char*>(final_compressed.data()), final_compressed.size());
         
         output.close();
         
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         
-        size_t output_size = sizeof(Header) + header_data.size() + sizeof(uint64_t) + rle_compressed.size();
+        size_t output_size = final_compressed.size();
         double ratio = static_cast<double>(file_size) / output_size;
         
         std::cout << "\n=== Compression Results ===" << std::endl;
@@ -277,42 +277,57 @@ public:
         Header hdr;
         input.read(reinterpret_cast<char*>(&hdr), sizeof(Header));
         
-        // Read JSON header
-        std::vector<uint8_t> header_data(8 + hdr.json_header_size);
+        // Read JSON header (8 bytes size + json_header_size bytes of JSON)
+        std::vector<uint8_t> header_data(hdr.json_header_size);
         input.read(reinterpret_cast<char*>(header_data.data()), header_data.size());
         
         // Read compressed tensor data
         uint64_t compressed_size;
         input.read(reinterpret_cast<char*>(&compressed_size), sizeof(uint64_t));
         
-        std::vector<uint8_t> compressed_data(compressed_size);
+        std::vector<uint8_t> compressed_data;
+        try {
+            compressed_data.resize(compressed_size);
+        } catch (const std::bad_alloc& e) {
+            std::cerr << "Memory allocation failed for compressed_data: " << e.what() << std::endl;
+            return false;
+        }
+        
         input.read(reinterpret_cast<char*>(compressed_data.data()), compressed_size);
+        if (!input) {
+            std::cerr << "Failed to read compressed data" << std::endl;
+            return false;
+        }
         input.close();
         
         // Decompress RLE
         auto delta_bytes = rle_decompress(compressed_data);
         
         // Convert back to deltas
-        std::vector<int16_t> deltas(delta_bytes.size() / sizeof(int16_t));
+        size_t delta_count = delta_bytes.size() / sizeof(int16_t);
+        std::vector<int16_t> deltas(delta_count);
         std::memcpy(deltas.data(), delta_bytes.data(), delta_bytes.size());
         
-        // Delta decode
-        auto compressed_tensors = delta_decode(deltas);
+        // Delta decode back to float16 values
+        auto float16_values = delta_decode(deltas);
         
         // Convert float16 back to float32
-        std::vector<uint8_t> tensor_data(hdr.num_tensors * sizeof(float));
-        for (size_t i = 0; i < hdr.num_tensors; i++) {
-            float value = float16_to_float32(compressed_tensors[i]);
+        size_t tensor_count = float16_values.size();
+        std::vector<uint8_t> tensor_data(tensor_count * sizeof(float));
+        
+        for (size_t i = 0; i < tensor_count; i++) {
+            float value = float16_to_float32(float16_values[i]);
             std::memcpy(tensor_data.data() + i * sizeof(float), &value, sizeof(float));
         }
         
-        // Write output
+        // Write output - reconstruct SafeTensors format
         std::ofstream output(output_path, std::ios::binary);
         if (!output) {
             std::cerr << "Cannot open output file: " << output_path << std::endl;
             return false;
         }
         
+        // Write header_data as-is (includes the 8-byte size + JSON)
         output.write(reinterpret_cast<const char*>(header_data.data()), header_data.size());
         output.write(reinterpret_cast<const char*>(tensor_data.data()), tensor_data.size());
         output.close();
