@@ -15,4 +15,7 @@ add_executable(codec codec.cpp)
 target_link_libraries(codec)
 
 add_executable(advcodec advcodec.cpp)
-target_link_libraries(advcodec)
+target_link_libraries(advcodec z)
+
+add_executable(codec_3 codec_3.cpp)
+target_link_libraries(codec_3 z)
