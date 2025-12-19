@@ -11,11 +11,11 @@ SET (CMAKE_CXX_FLAGS_DEBUG "-g3 -fsanitize=address")
 SET (BASE_DIR ${CMAKE_SOURCE_DIR} )
 SET (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${BASE_DIR}/../bin)
 
-add_executable(codec codec.cpp)
-target_link_libraries(codec)
+add_executable(base_codec base_codec.cpp)
+target_link_libraries(base_codec)
 
-add_executable(advcodec advcodec.cpp)
-target_link_libraries(advcodec z)
+add_executable(comp_codec comp_codec.cpp)
+target_link_libraries(comp_codec z)
 
-add_executable(codec_3 codec_3.cpp)
-target_link_libraries(codec_3 z)
+add_executable(final_codec final_codec.cpp)
+target_link_libraries(final_codec z)
