@@ -19,6 +19,3 @@ target_link_libraries(advcodec z)
 
 add_executable(codec_3 codec_3.cpp)
 target_link_libraries(codec_3 z)
-
-add_executable(codec_4 codec_4.cpp)
-target_link_libraries(codec_4 zstd)
